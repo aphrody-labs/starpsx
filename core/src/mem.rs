@@ -176,7 +176,8 @@ impl System {
 
             0x1F00_0000..0x1F00_0100 => stubbed!("expansion1", addr),
 
-            0x1F80_2000..0x1F80_2042 => unimplemented!("read to expansion2"),
+            // Expansion region 2 (DUART, POST, PCSX-Redux debug ports): open bus.
+            0x1F80_2000..0x1F80_4000 => stubbed!("expansion2", addr),
 
             // Garbage area, Gran Turismo 2 reads from here for some reason
             0x1F80_1130 => 0xDEAD_BEEF,
@@ -240,11 +241,14 @@ impl System {
                 trace!(target: "mem", region = "expansion1", "stubbed write addr={:#08x}", addr);
             }
 
-            0x1F80_2000..0x1F80_2042 => {
-                trace!(target: "mem", region = "expansion2", "stubbed write addr={:#08x}", addr);
-            }
+            // PCSX-Redux/OpenBIOS debug console: one character per byte write.
+            0x1F80_2080 => self.tty.push(data as u8),
 
             0x1F80_2082 => info!(exit_code = data, "pcsx-redux exit code"),
+
+            0x1F80_2000..0x1F80_4000 => {
+                trace!(target: "mem", region = "expansion2", "stubbed write addr={:#08x}", addr);
+            }
 
             _ => unimplemented!("write at {addr:#08X}"),
         }
