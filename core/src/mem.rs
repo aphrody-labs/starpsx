@@ -41,14 +41,23 @@ pub mod ram {
     pub const PADDR_START: u32 = 0x0000_0000;
     pub const PADDR_END: u32 = 0x0080_0000;
 
+    /// Bytes per page of the write-generation counters.
+    pub const PAGE_SHIFT: u32 = 12;
+
     pub struct Ram {
         pub bytes: Box<[u8; 0x20_0000]>,
+        /// Writes per 4 KiB page; static-recompilation runtimes re-validate translated code only
+        /// when its pages changed.
+        pub page_gen: Box<[u32; 0x20_0000 >> PAGE_SHIFT]>,
     }
 
     impl Default for Ram {
         fn default() -> Self {
             Self {
                 bytes: vec![0; 0x0020_0000].try_into().expect("ram alloc"),
+                page_gen: vec![0; 0x0020_0000 >> PAGE_SHIFT]
+                    .try_into()
+                    .expect("ram page alloc"),
             }
         }
     }
@@ -68,6 +77,17 @@ pub mod ram {
             let bytes = val.to_le_bytes(); // Convert u32 to [u8; 4]
 
             self.bytes[addr..addr + WIDTH].copy_from_slice(&bytes[..WIDTH]);
+            self.page_gen[addr >> PAGE_SHIFT] = self.page_gen[addr >> PAGE_SHIFT].wrapping_add(1);
+        }
+
+        /// Sum of the write generations of the pages holding `len` bytes at `addr`.
+        #[must_use]
+        pub fn generation(&self, addr: u32, len: u32) -> u64 {
+            let first = (addr & 0x1FF_FFF) >> PAGE_SHIFT;
+            let last = ((addr & 0x1FF_FFF) + len.max(1) - 1).min(0x1FF_FFF) >> PAGE_SHIFT;
+            (first..=last)
+                .map(|p| u64::from(self.page_gen[p as usize]))
+                .sum()
         }
     }
 }
@@ -242,7 +262,10 @@ impl System {
             }
 
             // PCSX-Redux/OpenBIOS debug console: one character per byte write.
-            0x1F80_2080 => self.tty.push(data as u8),
+            0x1F80_2080 => {
+                self.tty.push(data as u8);
+                self.console.push(data as u8);
+            }
 
             0x1F80_2082 => info!(exit_code = data, "pcsx-redux exit code"),
 

@@ -84,10 +84,10 @@ impl CdRom {
                 .int5([self.status.with_error(), 0x10], AVG_1ST_RESP_GENERIC);
         };
 
-        self.disk
-            .as_mut()
-            .expect("set_loc inserted disk")
-            .seek_location(m, s, f);
+        let Some(disk) = self.disk.as_mut() else {
+            return error_response(&self.status, 0x80, "set_loc without a disc");
+        };
+        disk.seek_location(m, s, f);
 
         CommandResponse::new().int3([self.status.0], AVG_1ST_RESP_GENERIC)
     }
@@ -242,7 +242,10 @@ impl CdRom {
 
         debug!(target: "cdrom", "cdrom get tn");
 
-        let disk = &self.disk.as_ref().expect("get_tn inserted disk");
+        // No disc (BIOS shell, open lid): error 0x80 like the drive, instead of a panic.
+        let Some(disk) = self.disk.as_ref() else {
+            return error_response(&self.status, 0x80, "get_tn without a disc");
+        };
 
         let first_track = to_bcd(disk.first_track_id()).expect("first track id is valid bcd");
         let last_track = to_bcd(disk.last_track_id()).expect("last track id is valid bcd");
@@ -257,7 +260,9 @@ impl CdRom {
 
         debug!(target: "cdrom", "cdrom get td");
 
-        let disk = &self.disk.as_ref().expect("get_td inserted disk");
+        let Some(disk) = self.disk.as_ref() else {
+            return error_response(&self.status, 0x80, "get_td without a disc");
+        };
         let last_track = disk.last_track_id();
 
         let Some(track) = from_bcd(self.parameters[0]).filter(|&x| x <= last_track) else {
@@ -314,7 +319,9 @@ impl CdRom {
 
         debug!(target: "cdrom", "cdrom getlocp");
 
-        let disk = self.disk.as_ref().expect("get_locp inserted disk");
+        let Some(disk) = self.disk.as_ref() else {
+            return error_response(&self.status, 0x80, "get_locp without a disc");
+        };
 
         CommandResponse::new().int3(
             disk.current_position_info()
@@ -338,7 +345,9 @@ impl CdRom {
 
         debug!(target: "cdrom", "cdrom getlocl");
 
-        let disk = self.disk.as_ref().expect("get_locl inserted disk");
+        let Some(disk) = self.disk.as_ref() else {
+            return error_response(&self.status, 0x80, "get_locl without a disc");
+        };
 
         CommandResponse::new().int3(disk.current_header_info(), AVG_1ST_RESP_GENERIC)
     }

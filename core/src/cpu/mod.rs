@@ -16,22 +16,22 @@ pub struct Cpu {
     pub regs: [u32; 32],
 
     /// Register copies for delay slot emulation
-    regd: [u32; 32],
+    pub regd: [u32; 32],
 
     /// Program counter
     pub pc: u32,
 
     /// Delayed branch slot
-    delayed_branch: Option<u32>,
+    pub delayed_branch: Option<u32>,
 
     /// Upper 32 bits of product or division remainder
-    hi: u32,
+    pub hi: u32,
 
     /// Lower 32 bits of product or division quotient
-    lo: u32,
+    pub lo: u32,
 
     /// Load to execute
-    load: Option<(usize, u32)>,
+    pub load: Option<(usize, u32)>,
 
     /// Coprocessor 0
     cop0: Cop0,
@@ -101,6 +101,25 @@ impl Cpu {
         }
     }
 
+    /// Whether an interrupt would be taken before the next instruction (no side effects).
+    #[must_use]
+    pub const fn interrupt_pending(system: &System) -> bool {
+        let cpu = &system.cpu;
+        let cause = if system.irqctl.pending() {
+            cpu.cop0.cause | (1 << 10)
+        } else {
+            cpu.cop0.cause & !(1 << 10)
+        };
+        let pending = (cause & cpu.cop0.sr) & 0x700;
+        pending != 0 && (cpu.cop0.sr & 1 != 0)
+    }
+
+    /// Whether the data cache is isolated (COP0 SR bit 16): `lw` and stores are ignored.
+    #[must_use]
+    pub const fn cache_isolated(&self) -> bool {
+        self.cop0.sr & 0x10000 != 0
+    }
+
     const fn pending_interrupts(system: &mut System) -> bool {
         let cpu = &mut system.cpu;
 
@@ -147,7 +166,8 @@ impl Cpu {
         };
     }
 
-    const fn take_delayed_load(&mut self, rt: usize, data: u32) {
+    /// Queue a load for the load delay slot (cancels a pending load to the same register).
+    pub const fn take_delayed_load(&mut self, rt: usize, data: u32) {
         // If there was already a pending load to this register, then cancel it.
         if self.regd[rt] != self.regs[rt] {
             self.regd[rt] = self.regs[rt];
@@ -230,7 +250,7 @@ impl Cpu {
             0x32 => gte::lwc2(system, instr)?,
             0x12 => gte::cop2(system, instr)?,
             0x3A => gte::swc2(system, instr)?,
-            0x10 => cop0::cop0(system, instr),
+            0x10 => cop0::cop0(system, instr)?,
 
             _ => {
                 error!("Illegal instruction {:08x}", instr.0);

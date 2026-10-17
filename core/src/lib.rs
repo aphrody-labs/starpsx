@@ -1,6 +1,6 @@
 mod cdrom;
 mod consts;
-mod cpu;
+pub mod cpu;
 mod dma;
 mod gpu;
 mod irq;
@@ -49,8 +49,13 @@ pub enum Media {
     Executable(Vec<u8>),
 }
 
+/// Static-recompilation runner: executes up to `budget` instructions of translated code in place
+/// of interpreter steps and returns how many it ran (0 lets the interpreter execute one).
+pub type Runner = fn(&mut System, u32) -> u32;
+
 pub struct System {
     cpu: Cpu,
+    runner: Option<Runner>,
     gpu: Gpu,
     spu: Spu,
 
@@ -69,6 +74,8 @@ pub struct System {
     sio1: Sio1,
 
     tty: Vec<u8>,
+    /// Every TTY byte (BIOS putchar and the debug port), drained by `take_console`.
+    console: Vec<u8>,
     scheduler: EventScheduler,
 
     // RGBA frame buffer
@@ -79,6 +86,13 @@ pub struct System {
 impl System {
     fn sideload_exe(&mut self, exe: &[u8]) -> anyhow::Result<()> {
         while self.cpu.pc != 0x8003_0000 {
+            // Translated code runs one instruction at a time here so the stop address is exact.
+            if let Some(run) = self.runner
+                && run(self, 1) > 0
+            {
+                self.check_for_tty_output();
+                continue;
+            }
             Cpu::run_next_instruction(self);
             self.check_for_tty_output();
         }
@@ -109,6 +123,11 @@ impl System {
             .context("EXE file truncated")?;
 
         dest.copy_from_slice(src);
+        for page in (exe_addr as usize >> mem::ram::PAGE_SHIFT)
+            ..=((exe_addr as usize + exe_size.max(1) - 1) >> mem::ram::PAGE_SHIFT)
+        {
+            self.ram.page_gen[page] = self.ram.page_gen[page].wrapping_add(1);
+        }
 
         self.cpu.regs[28] = init_r28;
         if init_sp != 0 {
@@ -147,6 +166,7 @@ impl System {
         let pc = self.cpu.pc & 0x1FFF_FFFF;
         if (pc == 0xA0 && self.cpu.regs[9] == 0x3C) || (pc == 0xB0 && self.cpu.regs[9] == 0x3D) {
             let byte = self.cpu.regs[4] as u8;
+            self.console.push(byte);
             if byte == b'\n' || byte == b'\r' {
                 info!("[TTY]" = %String::from_utf8_lossy(&self.tty));
                 self.tty.clear();
@@ -186,6 +206,34 @@ impl System {
         SystemSnapshot { cpu, spu, gpu, ins }
     }
 
+    /// TTY output produced since the last call.
+    pub fn take_console(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.console)
+    }
+
+    /// Install (or remove) the static-recompilation runner.
+    pub fn set_runner(&mut self, runner: Option<Runner>) {
+        self.runner = runner;
+    }
+
+    /// Write generation of the RAM pages holding `len` bytes at `addr` (`None` outside RAM):
+    /// unchanged generations mean unchanged code.
+    #[must_use]
+    pub fn ram_generation(&self, addr: u32, len: u32) -> Option<u64> {
+        let phys = addr & 0x1FFF_FFFF;
+        (phys < mem::ram::PADDR_END).then(|| self.ram.generation(phys, len))
+    }
+
+    /// CPU state for static-recompilation runtimes.
+    pub const fn cpu_mut(&mut self) -> &mut Cpu {
+        &mut self.cpu
+    }
+
+    /// CPU state for static-recompilation runtimes.
+    pub const fn cpu(&self) -> &Cpu {
+        &self.cpu
+    }
+
     // Run emulator for one frame
     pub fn run_frame(&mut self, show_vram: bool) {
         self.audio_samples.clear();
@@ -209,9 +257,20 @@ impl System {
             }
 
             // Run instructions in blocks of 20
-            for _ in 0..20 {
+            let mut ran = 0;
+            while ran < 20 {
+                if let Some(run) = self.runner {
+                    let n = run(self, 20 - ran);
+                    if n > 0 {
+                        // Translated code ends a block where the interpreter would check TTY.
+                        self.check_for_tty_output();
+                        ran += n;
+                        continue;
+                    }
+                }
                 Cpu::run_next_instruction(self);
                 self.check_for_tty_output();
+                ran += 1;
             }
 
             // Fixed 2 CPI right now
@@ -266,6 +325,7 @@ pub struct SystemSnapshot {
 }
 
 pub struct PSXBuilder {
+    runner: Option<Runner>,
     bios: Bios,
     disc: Option<Image>,
     exec: Option<Vec<u8>>,
@@ -276,6 +336,7 @@ impl PSXBuilder {
     #[must_use]
     pub const fn new(bios: Box<[u8; 0x80000]>) -> Self {
         Self {
+            runner: None,
             bios: Bios::new(bios),
             disc: None,
             exec: None,
@@ -294,6 +355,13 @@ impl PSXBuilder {
         self
     }
 
+    /// Run translated code (static recompilation) from the first instruction, BIOS boot included.
+    #[must_use]
+    pub const fn with_runner(mut self, runner: Runner) -> Self {
+        self.runner = Some(runner);
+        self
+    }
+
     #[must_use]
     pub fn with_card(mut self, card: Box<[u8; 0x20000]>) -> Self {
         self.card = Some(MemoryCard::from_bytes(card));
@@ -306,6 +374,7 @@ impl PSXBuilder {
     pub fn build(self) -> anyhow::Result<System> {
         let mut psx = System {
             cpu: Cpu::default(),
+            runner: self.runner,
             gpu: Gpu::default(),
             spu: Spu::default(),
 
@@ -320,6 +389,7 @@ impl PSXBuilder {
             mdec: MacroDecoder::default(),
 
             tty: Vec::new(),
+            console: Vec::new(),
             scheduler: EventScheduler::default(),
 
             // Only 1 gamepad and memory card  for now

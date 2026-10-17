@@ -1,5 +1,6 @@
 use super::Instruction;
 use super::System;
+use super::utils::Exception;
 
 #[derive(Default)]
 pub struct Cop0 {
@@ -22,13 +23,18 @@ impl Cop0 {
     }
 }
 
-pub fn cop0(system: &mut System, instr: Instruction) {
+/// # Errors
+///
+/// COP0 commands other than MFC0, MTC0 and RFE (the TLB operations of other R3000 parts) raise a
+/// reserved instruction exception: the PlayStation's COP0 has no TLB.
+pub fn cop0(system: &mut System, instr: Instruction) -> Result<(), Exception> {
     match instr.rs() {
         0x00 => mfc0(system, instr),
         0x04 => mtc0(system, instr),
-        0x10 => rfe(system, instr),
-        _ => unimplemented!("cop0 instruction {:#08X}", instr.0),
+        0x10..=0x1F if instr.sec() == 0x10 => rfe(system, instr),
+        _ => return Err(Exception::IllegalInstruction),
     }
+    Ok(())
 }
 
 /// Move to cop0 register
